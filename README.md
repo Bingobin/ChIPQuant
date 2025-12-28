@@ -23,14 +23,14 @@
 
 ## Usage
 
-Execute the package from the project root:
+Execute the tool from the project root:
 
 ```bash
-python -m src.main --gtf /path/to/genes.gtf \
-                   --bam /path/to/chipseq.bam \
-                   --out counts_output.tsv \
-                   --promoter_upstream 2000 \
-                   --promoter_downstream 2000
+python chipquant.py --gtf /path/to/genes.gtf \
+                    --bam /path/to/chipseq.bam \
+                    --out counts_output.tsv \
+                    --promoter_upstream 2000 \
+                    --promoter_downstream 2000
 ```
 
 ### Parameters

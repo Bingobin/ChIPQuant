@@ -175,6 +175,7 @@ class BAMProcessor:
         """
         Yield fragment intervals as (chrom, start, end) in 0-based, half-open coordinates.
         """
+        self.bam.reset()
         for read in self.bam.fetch(until_eof=True):
             if not self._should_count_read(read):
                 continue

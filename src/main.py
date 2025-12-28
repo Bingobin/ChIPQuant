@@ -5,7 +5,7 @@ import multiprocessing
 from .gtf_parser import GTFParser
 from .bam_processor import BAMProcessor
 from .quantifier import Quantifier
-from .utils import get_promoter_region
+from .summary import start_summary_worker
 # Need to import quantify_gene_core only inside worker or use it if available
 # But it's in .quantifier which we imported Quantifier from. 
 # Better to import specifically if needed or just use module path if imported.
@@ -89,36 +89,6 @@ def process_gene_wrapper(args):
     gene_info, p_up, p_down = args
     return quantify_gene_core(gene_info, _global_bam_processor, p_up, p_down)
 
-def _merge_intervals(intervals):
-    intervals = sorted(intervals, key=lambda x: x[0])
-    merged = []
-    for start, end in intervals:
-        if not merged or start > merged[-1][1]:
-            merged.append([start, end])
-        else:
-            if end > merged[-1][1]:
-                merged[-1][1] = end
-    return [(start, end) for start, end in merged]
-
-def _build_intervals_by_chrom(genes, p_up, p_down):
-    gene_body = {}
-    promoter = {}
-    for gene in genes:
-        chrom = gene["chrom"]
-        gene_body.setdefault(chrom, []).append((gene["start"] - 1, gene["end"]))
-        p_start, p_end = get_promoter_region(
-            gene["chrom"],
-            gene["start"],
-            gene["end"],
-            gene["strand"],
-            p_up,
-            p_down,
-        )
-        promoter.setdefault(chrom, []).append((p_start - 1, p_end))
-    gene_body = {chrom: _merge_intervals(iv) for chrom, iv in gene_body.items()}
-    promoter = {chrom: _merge_intervals(iv) for chrom, iv in promoter.items()}
-    return gene_body, promoter
-
 def main():
     args = parse_args()
     
@@ -137,11 +107,8 @@ def main():
     parser = GTFParser(args.gtf)
     print(f"Processing genes from {args.gtf}...", file=sys.stderr)
     genes = list(parser.get_genes())
-    gene_body_intervals, promoter_intervals = _build_intervals_by_chrom(
-        genes,
-        args.promoter_upstream,
-        args.promoter_downstream,
-    )
+
+    summary_conn, summary_proc = start_summary_worker(args, genes)
 
     with open(args.out, "w", newline="") as f_out:
         writer = csv.writer(f_out, delimiter="\t")
@@ -237,35 +204,23 @@ def main():
             bam_proc.close()
 
     if args.summary_out:
-        print("Calculating summary...", file=sys.stderr)
-        bam_proc = BAMProcessor(
-            args.bam,
-            min_mapq=args.min_mapq,
-            include_secondary=args.include_secondary,
-            include_supplementary=args.include_supplementary,
-            include_duplicates=args.include_duplicates,
-            require_paired=not args.allow_unpaired,
-            require_proper_pair=not args.allow_improper_pair,
-            count_fragments=not args.count_all_paired_reads,
-            cpm_denominator=args.cpm_denominator,
-        )
-        total_fragments = bam_proc.count_filtered_fragments()
-        gene_body_fragments = bam_proc.count_fragments_overlapping(gene_body_intervals)
-        promoter_fragments = bam_proc.count_fragments_overlapping(promoter_intervals)
-        bam_proc.close()
-
-        with open(args.summary_out, "w", newline="") as f_sum:
-            writer = csv.writer(f_sum, delimiter="\t")
-            writer.writerow(["Metric", "Value"])
-            writer.writerow(["Total_Filtered_Fragments", total_fragments])
-            writer.writerow(["GeneBody_Overlap_Fragments", gene_body_fragments])
-            writer.writerow(["Promoter_Overlap_Fragments", promoter_fragments])
-
-        print(
-            f"\n[Done] Processed {count} genes. Results saved to {args.out}. "
-            f"Summary saved to {args.summary_out}",
-            file=sys.stderr,
-        )
+        print("Waiting for summary...", file=sys.stderr)
+        total_fragments, gene_body_fragments, promoter_fragments, err = summary_conn.recv()
+        summary_proc.join()
+        if err:
+            print(f"Summary failed: {err}", file=sys.stderr)
+        else:
+            with open(args.summary_out, "w", newline="") as f_sum:
+                writer = csv.writer(f_sum, delimiter="\t")
+                writer.writerow(["Metric", "Value"])
+                writer.writerow(["Total_Mapped_Fragments", total_fragments])
+                writer.writerow(["GeneBody_Overlap_Fragments", gene_body_fragments])
+                writer.writerow(["Promoter_Overlap_Fragments", promoter_fragments])
+            print(
+                f"\n[Done] Processed {count} genes. Results saved to {args.out}. "
+                f"Summary saved to {args.summary_out}",
+                file=sys.stderr,
+            )
     else:
         print(
             f"\n[Done] Processed {count} genes. Results saved to {args.out}",

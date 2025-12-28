@@ -63,6 +63,6 @@ The output TSV contains:
 ## Summary Output
 
 When `--summary-out` is provided, a summary TSV is written containing:
-- **Total_Filtered_Fragments**: Total fragments passing filters across the BAM.
+- **Total_Mapped_Fragments**: Total fragments passing filters across the BAM.
 - **GeneBody_Overlap_Fragments**: Unique fragments overlapping any gene body region.
 - **Promoter_Overlap_Fragments**: Unique fragments overlapping any promoter region.

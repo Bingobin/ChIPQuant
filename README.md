@@ -40,6 +40,15 @@ python -m src.main --gtf /path/to/genes.gtf \
 - `--out`: Path for the output TSV file.
 - `--promoter_upstream`: Base pairs upstream of TSS (default: 2000).
 - `--promoter_downstream`: Base pairs downstream of TSS (default: 2000).
+- `--threads` / `-t`: Number of worker processes (default: 1).
+- `--min_mapq`: Minimum MAPQ to count a read (default: 30).
+- `--include-secondary`: Include secondary alignments (default: false).
+- `--include-supplementary`: Include supplementary alignments (default: false).
+- `--include-duplicates`: Include duplicate reads (default: false).
+- `--allow-unpaired`: Allow unpaired reads to be counted (default: false).
+- `--allow-improper-pair`: Allow improperly paired reads to be counted (default: false).
+- `--count-all-paired-reads`: Count both mates instead of fragment-level counting (default: false).
+- `--cpm-denominator`: CPM denominator strategy: `filtered` (default) or `mapped`.
 
 ## Output Format
 

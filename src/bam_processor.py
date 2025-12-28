@@ -84,12 +84,16 @@ class BAMProcessor:
         try:
             for read in bam.fetch(until_eof=True):
                 if self.count_fragments:
-                    if (
-                        read.is_paired
-                        and read.is_read1
-                        and read.reference_id == read.next_reference_id
-                        and self._should_count_read(read)
-                    ):
+                    if not self._should_count_read(read):
+                        continue
+                    if read.is_paired:
+                        if (
+                            read.is_read1
+                            and read.reference_id == read.next_reference_id
+                            and read.template_length != 0
+                        ):
+                            count += 1
+                    else:
                         count += 1
                 elif self._should_count_read(read):
                     count += 1
@@ -139,15 +143,19 @@ class BAMProcessor:
                     for read in self.bam.fetch(contig=chrom, start=region_start, stop=region_end):
                         if not self._should_count_read(read):
                             continue
-                        if not read.is_paired or read.reference_id != read.next_reference_id:
+                        if read.is_paired and read.reference_id != read.next_reference_id:
                             continue
                         if read.query_name in counted_qnames:
                             continue
-                        tlen = abs(read.template_length)
-                        if tlen == 0:
-                            continue
-                        fragment_start = min(read.reference_start, read.next_reference_start)
-                        fragment_end = fragment_start + tlen
+                        if read.is_paired:
+                            tlen = abs(read.template_length)
+                            if tlen == 0:
+                                continue
+                            fragment_start = min(read.reference_start, read.next_reference_start)
+                            fragment_end = fragment_start + tlen
+                        else:
+                            fragment_start = read.reference_start
+                            fragment_end = read.reference_end
                         if fragment_end > region_start and fragment_start < region_end:
                             counted_qnames.add(read.query_name)
                             count += 1
@@ -162,3 +170,60 @@ class BAMProcessor:
 
     def close(self):
         self.bam.close()
+
+    def iter_fragments(self):
+        """
+        Yield fragment intervals as (chrom, start, end) in 0-based, half-open coordinates.
+        """
+        for read in self.bam.fetch(until_eof=True):
+            if not self._should_count_read(read):
+                continue
+            if read.is_paired:
+                if not read.is_read1:
+                    continue
+                if read.reference_id != read.next_reference_id:
+                    continue
+                tlen = abs(read.template_length)
+                if tlen == 0:
+                    continue
+                start = min(read.reference_start, read.next_reference_start)
+                end = start + tlen
+            else:
+                start = read.reference_start
+                end = read.reference_end
+            yield read.reference_name, start, end
+
+    def count_fragments_overlapping(self, intervals_by_chrom):
+        count = 0
+        for chrom, start, end in self.iter_fragments():
+            intervals = intervals_by_chrom.get(chrom)
+            if not intervals:
+                continue
+            if _intervals_overlap(intervals, start, end):
+                count += 1
+        return count
+
+    def count_filtered_fragments(self):
+        if not self.count_fragments:
+            return self._count_all_reads_with_filters()
+        count = 0
+        for _ in self.iter_fragments():
+            count += 1
+        return count
+
+def _intervals_overlap(intervals, start, end):
+    """
+    intervals: list of (start, end) sorted, non-overlapping, 0-based half-open.
+    """
+    lo = 0
+    hi = len(intervals) - 1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        iv_start, iv_end = intervals[mid]
+        if end <= iv_start:
+            hi = mid - 1
+        elif start >= iv_end:
+            lo = mid + 1
+        else:
+            return True
+    return False

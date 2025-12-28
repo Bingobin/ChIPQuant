@@ -5,6 +5,7 @@ import multiprocessing
 from .gtf_parser import GTFParser
 from .bam_processor import BAMProcessor
 from .quantifier import Quantifier
+from .utils import get_promoter_region
 # Need to import quantify_gene_core only inside worker or use it if available
 # But it's in .quantifier which we imported Quantifier from. 
 # Better to import specifically if needed or just use module path if imported.
@@ -41,6 +42,8 @@ def parse_args():
                     help="Count both mates instead of read1 only")
     ap.add_argument("--cpm-denominator", choices=["mapped", "filtered"], default="filtered",
                     help="CPM denominator: total mapped reads or reads passing filters")
+    ap.add_argument("--summary-out",
+                    help="Write summary metrics to this TSV path (default: disabled)")
     return ap.parse_args()
 
 # Global variable for worker processes
@@ -86,6 +89,36 @@ def process_gene_wrapper(args):
     gene_info, p_up, p_down = args
     return quantify_gene_core(gene_info, _global_bam_processor, p_up, p_down)
 
+def _merge_intervals(intervals):
+    intervals = sorted(intervals, key=lambda x: x[0])
+    merged = []
+    for start, end in intervals:
+        if not merged or start > merged[-1][1]:
+            merged.append([start, end])
+        else:
+            if end > merged[-1][1]:
+                merged[-1][1] = end
+    return [(start, end) for start, end in merged]
+
+def _build_intervals_by_chrom(genes, p_up, p_down):
+    gene_body = {}
+    promoter = {}
+    for gene in genes:
+        chrom = gene["chrom"]
+        gene_body.setdefault(chrom, []).append((gene["start"] - 1, gene["end"]))
+        p_start, p_end = get_promoter_region(
+            gene["chrom"],
+            gene["start"],
+            gene["end"],
+            gene["strand"],
+            p_up,
+            p_down,
+        )
+        promoter.setdefault(chrom, []).append((p_start - 1, p_end))
+    gene_body = {chrom: _merge_intervals(iv) for chrom, iv in gene_body.items()}
+    promoter = {chrom: _merge_intervals(iv) for chrom, iv in promoter.items()}
+    return gene_body, promoter
+
 def main():
     args = parse_args()
     
@@ -103,13 +136,19 @@ def main():
     count = 0
     parser = GTFParser(args.gtf)
     print(f"Processing genes from {args.gtf}...", file=sys.stderr)
+    genes = list(parser.get_genes())
+    gene_body_intervals, promoter_intervals = _build_intervals_by_chrom(
+        genes,
+        args.promoter_upstream,
+        args.promoter_downstream,
+    )
 
     with open(args.out, "w", newline="") as f_out:
         writer = csv.writer(f_out, delimiter="\t")
         writer.writerow(headers)
         
         # Generator for gene info
-        genes_iter = parser.get_genes()
+        genes_iter = iter(genes)
 
         if args.threads > 1:
             print(f"Running in parallel with {args.threads} threads...", file=sys.stderr)
@@ -197,7 +236,41 @@ def main():
             
             bam_proc.close()
 
-    print(f"\n[Done] Processed {count} genes. Results saved to {args.out}", file=sys.stderr)
+    if args.summary_out:
+        print("Calculating summary...", file=sys.stderr)
+        bam_proc = BAMProcessor(
+            args.bam,
+            min_mapq=args.min_mapq,
+            include_secondary=args.include_secondary,
+            include_supplementary=args.include_supplementary,
+            include_duplicates=args.include_duplicates,
+            require_paired=not args.allow_unpaired,
+            require_proper_pair=not args.allow_improper_pair,
+            count_fragments=not args.count_all_paired_reads,
+            cpm_denominator=args.cpm_denominator,
+        )
+        total_fragments = bam_proc.count_filtered_fragments()
+        gene_body_fragments = bam_proc.count_fragments_overlapping(gene_body_intervals)
+        promoter_fragments = bam_proc.count_fragments_overlapping(promoter_intervals)
+        bam_proc.close()
+
+        with open(args.summary_out, "w", newline="") as f_sum:
+            writer = csv.writer(f_sum, delimiter="\t")
+            writer.writerow(["Metric", "Value"])
+            writer.writerow(["Total_Filtered_Fragments", total_fragments])
+            writer.writerow(["GeneBody_Overlap_Fragments", gene_body_fragments])
+            writer.writerow(["Promoter_Overlap_Fragments", promoter_fragments])
+
+        print(
+            f"\n[Done] Processed {count} genes. Results saved to {args.out}. "
+            f"Summary saved to {args.summary_out}",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"\n[Done] Processed {count} genes. Results saved to {args.out}",
+            file=sys.stderr,
+        )
 
 if __name__ == "__main__":
     main()

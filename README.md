@@ -49,16 +49,20 @@ python chipquant.py --gtf /path/to/genes.gtf \
 - `--allow-improper-pair`: Allow improperly paired reads to be counted (default: false).
 - `--count-all-paired-reads`: Count both mates instead of fragment-level counting (default: false).
 - `--cpm-denominator`: CPM denominator strategy: `filtered` (default) or `mapped`.
+- `--summary-out`: Write summary metrics to this TSV path (default: disabled).
 
 ## Output Format
 
 The output TSV contains:
-- Gene Metadata (ID, Symbol, Type, Position)
+- Gene Metadata (ID, Symbol, Type)
 - **GeneBody_Count**: Raw reads in gene body.
 - **GeneBody_CPM**: CPM normalized counts for gene body.
 - **Promoter_Count**: Raw reads in promoter region.
 - **Promoter_CPM**: CPM normalized counts for promoter region.
 
-## License
+## Summary Output
 
-MIT
+When `--summary-out` is provided, a summary TSV is written containing:
+- **Total_Filtered_Fragments**: Total fragments passing filters across the BAM.
+- **GeneBody_Overlap_Fragments**: Unique fragments overlapping any gene body region.
+- **Promoter_Overlap_Fragments**: Unique fragments overlapping any promoter region.

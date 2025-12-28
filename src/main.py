@@ -91,9 +91,13 @@ def main():
     
     # Headers for output
     headers = [
-        "GeneID", "Symbol", "GeneType", "Chr", "Strand",
-        "GeneStart", "GeneEnd", "GeneBody_Count", "GeneBody_CPM",
-        "PromoterStart", "PromoterEnd", "Promoter_Count", "Promoter_CPM"
+        "GeneID",
+        "Symbol",
+        "GeneType",
+        "GeneBody_Count",
+        "GeneBody_CPM",
+        "Promoter_Count",
+        "Promoter_CPM",
     ]
     
     count = 0
@@ -136,16 +140,10 @@ def main():
                         res['gene_id'],
                         res['gene_name'],
                         res['gene_type'],
-                        res['chrom'],
-                        res['strand'],
-                        res['start'],
-                        res['end'],
                         res['gene_body_count'],
                         f"{res['gene_body_cpm']:.4f}",
-                        res['promoter_start'],
-                        res['promoter_end'],
                         res['promoter_count'],
-                        f"{res['promoter_cpm']:.4f}"
+                        f"{res['promoter_cpm']:.4f}",
                     ]
                     writer.writerow(row)
                     count += 1
@@ -186,16 +184,10 @@ def main():
                     res['gene_id'],
                     res['gene_name'],
                     res['gene_type'],
-                    res['chrom'],
-                    res['strand'],
-                    res['start'],
-                    res['end'],
                     res['gene_body_count'],
                     f"{res['gene_body_cpm']:.4f}",
-                    res['promoter_start'],
-                    res['promoter_end'],
                     res['promoter_count'],
-                    f"{res['promoter_cpm']:.4f}"
+                    f"{res['promoter_cpm']:.4f}",
                 ]
                 writer.writerow(row)
                 count += 1

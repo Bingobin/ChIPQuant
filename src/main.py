@@ -3,27 +3,24 @@ import sys
 import csv
 import multiprocessing
 from .gtf_parser import GTFParser
+from .bed_parser import BEDParser
 from .bam_processor import BAMProcessor
-from .quantifier import Quantifier
-from .summary import start_summary_worker
-# Need to import quantify_gene_core only inside worker or use it if available
-# But it's in .quantifier which we imported Quantifier from. 
-# Better to import specifically if needed or just use module path if imported.
-# Actually, to use quantify_gene_core in wrapper, we might need to import it inside wrapper or at top level if it's available.
-# Let's import it at top level.
 from .quantifier import Quantifier, quantify_gene_core
+from .summary import start_summary_worker, start_bed_summary_worker
 
 def parse_args():
     ap = argparse.ArgumentParser(
-        description="Calculate Gene Body and Promoter Counts/CPM from ChIP-seq BAM and GTF."
+        description="Calculate read counts/CPM from ChIP-seq BAM and GTF/BED."
     )
-    ap.add_argument("--gtf", required=True, help="GTF annotation file.")
+    input_group = ap.add_mutually_exclusive_group(required=True)
+    input_group.add_argument("--gtf", help="GTF annotation file.")
+    input_group.add_argument("--bed", help="BED regions file (0-based, half-open).")
     ap.add_argument("--bam", required=True, help="ChIP-seq BAM file (indexed).")
     ap.add_argument("--out", required=True, help="Output TSV file path.")
     ap.add_argument("--promoter_upstream", type=int, default=2000, 
-                    help="Promoter upstream distance from TSS (default: 2000)")
+                    help="Promoter upstream distance from TSS (default: 2000, GTF only)")
     ap.add_argument("--promoter_downstream", type=int, default=2000, 
-                    help="Promoter downstream distance from TSS (default: 2000)")
+                    help="Promoter downstream distance from TSS (default: 2000, GTF only)")
     ap.add_argument("--threads", "-t", type=int, default=1,
                     help="Number of threads (processes) to use (default: 1)")
     ap.add_argument("--min_mapq", type=int, default=30,
@@ -89,41 +86,67 @@ def process_gene_wrapper(args):
     gene_info, p_up, p_down = args
     return quantify_gene_core(gene_info, _global_bam_processor, p_up, p_down)
 
+def process_bed_wrapper(region):
+    """
+    Wrapper to process a single BED region using global BAMProcessor.
+    """
+    chrom = region["chrom"]
+    start = region["start"]
+    end = region["end"]
+    count = _global_bam_processor.count_reads(chrom, start + 1, end)
+    total_reads = _global_bam_processor.total_mapped_reads
+    cpm = (count / total_reads * 1_000_000) if total_reads > 0 else 0.0
+    return {
+        "region_id": region["name"],
+        "chrom": chrom,
+        "start": start,
+        "end": end,
+        "strand": region.get("strand", "."),
+        "count": count,
+        "cpm": cpm,
+    }
+
 def main():
     args = parse_args()
     
-    # Headers for output
-    headers = [
-        "GeneID",
-        "Symbol",
-        "GeneType",
-        "GeneBody_Count",
-        "GeneBody_CPM",
-        "Promoter_Count",
-        "Promoter_CPM",
-    ]
-    
     count = 0
-    parser = GTFParser(args.gtf)
-    print(f"Processing genes from {args.gtf}...", file=sys.stderr)
-    genes = list(parser.get_genes())
-
-    summary_conn, summary_proc = start_summary_worker(args, genes)
+    is_bed = args.bed is not None
+    if is_bed:
+        headers = [
+            "RegionID",
+            "Chrom",
+            "Start",
+            "End",
+            "Strand",
+            "Count",
+            "CPM",
+        ]
+        parser = BEDParser(args.bed)
+        print(f"Processing regions from {args.bed}...", file=sys.stderr)
+        regions = list(parser.get_regions())
+        summary_conn, summary_proc = start_bed_summary_worker(args, regions)
+    else:
+        headers = [
+            "GeneID",
+            "Symbol",
+            "GeneType",
+            "GeneBody_Count",
+            "GeneBody_CPM",
+            "Promoter_Count",
+            "Promoter_CPM",
+        ]
+        parser = GTFParser(args.gtf)
+        print(f"Processing genes from {args.gtf}...", file=sys.stderr)
+        genes = list(parser.get_genes())
+        summary_conn, summary_proc = start_summary_worker(args, genes)
 
     with open(args.out, "w", newline="") as f_out:
         writer = csv.writer(f_out, delimiter="\t")
         writer.writerow(headers)
-        
-        # Generator for gene info
-        genes_iter = iter(genes)
 
         if args.threads > 1:
             print(f"Running in parallel with {args.threads} threads...", file=sys.stderr)
-            
-            # Prepare arguments generator
-            # Each item is (gene_info, p_up, p_down)
-            tasks = ((gene, args.promoter_upstream, args.promoter_downstream) for gene in genes_iter)
-            
+
             with multiprocessing.Pool(
                 processes=args.threads,
                 initializer=init_worker,
@@ -139,23 +162,40 @@ def main():
                     args.cpm_denominator,
                 ),
             ) as pool:
-                # Use imap to report progress and streaming results
-                # chunksize can be tuned, e.g. 100
-                for res in pool.imap(process_gene_wrapper, tasks, chunksize=100):
-                    row = [
-                        res['gene_id'],
-                        res['gene_name'],
-                        res['gene_type'],
-                        res['gene_body_count'],
-                        f"{res['gene_body_cpm']:.4f}",
-                        res['promoter_count'],
-                        f"{res['promoter_cpm']:.4f}",
-                    ]
-                    writer.writerow(row)
-                    count += 1
-                    if count % 1000 == 0:
-                        print(f"Processed {count} genes...", end="\r", file=sys.stderr)
-        
+                if is_bed:
+                    tasks = (region for region in regions)
+                    for res in pool.imap(process_bed_wrapper, tasks, chunksize=100):
+                        row = [
+                            res["region_id"],
+                            res["chrom"],
+                            res["start"],
+                            res["end"],
+                            res["strand"],
+                            res["count"],
+                            f"{res['cpm']:.4f}",
+                        ]
+                        writer.writerow(row)
+                        count += 1
+                        if count % 1000 == 0:
+                            print(f"Processed {count} regions...", end="\r", file=sys.stderr)
+                else:
+                    genes_iter = iter(genes)
+                    tasks = ((gene, args.promoter_upstream, args.promoter_downstream) for gene in genes_iter)
+                    for res in pool.imap(process_gene_wrapper, tasks, chunksize=100):
+                        row = [
+                            res['gene_id'],
+                            res['gene_name'],
+                            res['gene_type'],
+                            res['gene_body_count'],
+                            f"{res['gene_body_cpm']:.4f}",
+                            res['promoter_count'],
+                            f"{res['promoter_cpm']:.4f}",
+                        ]
+                        writer.writerow(row)
+                        count += 1
+                        if count % 1000 == 0:
+                            print(f"Processed {count} genes...", end="\r", file=sys.stderr)
+
         else:
             # Single-threaded mode
             print(f"Loading BAM: {args.bam}", file=sys.stderr)
@@ -174,58 +214,105 @@ def main():
             except Exception as e:
                 print(f"Error opening BAM file: {e}", file=sys.stderr)
                 sys.exit(1)
-                
+
             print(f"Total Mapped Reads: {bam_proc.total_mapped_reads}", file=sys.stderr)
-            
-            quantifier = Quantifier(
-                bam_proc, 
-                promoter_upstream=args.promoter_upstream, 
-                promoter_downstream=args.promoter_downstream
-            )
-            
-            for gene_info in genes_iter:
-                res = quantifier.process_gene(gene_info)
-                
-                row = [
-                    res['gene_id'],
-                    res['gene_name'],
-                    res['gene_type'],
-                    res['gene_body_count'],
-                    f"{res['gene_body_cpm']:.4f}",
-                    res['promoter_count'],
-                    f"{res['promoter_cpm']:.4f}",
-                ]
-                writer.writerow(row)
-                count += 1
-                
-                if count % 1000 == 0:
-                    print(f"Processed {count} genes...", end="\r", file=sys.stderr)
-            
+
+            if is_bed:
+                for region in regions:
+                    count_reads = bam_proc.count_reads(
+                        region["chrom"], region["start"] + 1, region["end"]
+                    )
+                    cpm = (
+                        count_reads / bam_proc.total_mapped_reads * 1_000_000
+                        if bam_proc.total_mapped_reads > 0
+                        else 0.0
+                    )
+                    row = [
+                        region["name"],
+                        region["chrom"],
+                        region["start"],
+                        region["end"],
+                        region.get("strand", "."),
+                        count_reads,
+                        f"{cpm:.4f}",
+                    ]
+                    writer.writerow(row)
+                    count += 1
+                    if count % 1000 == 0:
+                        print(f"Processed {count} regions...", end="\r", file=sys.stderr)
+            else:
+                genes_iter = iter(genes)
+                quantifier = Quantifier(
+                    bam_proc,
+                    promoter_upstream=args.promoter_upstream,
+                    promoter_downstream=args.promoter_downstream,
+                )
+                for gene_info in genes_iter:
+                    res = quantifier.process_gene(gene_info)
+
+                    row = [
+                        res['gene_id'],
+                        res['gene_name'],
+                        res['gene_type'],
+                        res['gene_body_count'],
+                        f"{res['gene_body_cpm']:.4f}",
+                        res['promoter_count'],
+                        f"{res['promoter_cpm']:.4f}",
+                    ]
+                    writer.writerow(row)
+                    count += 1
+
+                    if count % 1000 == 0:
+                        print(f"Processed {count} genes...", end="\r", file=sys.stderr)
+
             bam_proc.close()
 
     if args.summary_out:
         print("Waiting for summary...", file=sys.stderr)
-        total_fragments, gene_body_fragments, promoter_fragments, err = summary_conn.recv()
-        summary_proc.join()
-        if err:
-            print(f"Summary failed: {err}", file=sys.stderr)
+        if is_bed:
+            total_fragments, bed_fragments, err = summary_conn.recv()
+            summary_proc.join()
+            if err:
+                print(f"Summary failed: {err}", file=sys.stderr)
+            else:
+                with open(args.summary_out, "w", newline="") as f_sum:
+                    writer = csv.writer(f_sum, delimiter="\t")
+                    writer.writerow(["Metric", "Value"])
+                    writer.writerow(["Total_Mapped_Fragments", total_fragments])
+                    writer.writerow(["BED_Overlap_Fragments", bed_fragments])
+                print(
+                    f"\n[Done] Processed {count} regions. Results saved to {args.out}. "
+                    f"Summary saved to {args.summary_out}",
+                    file=sys.stderr,
+                )
         else:
-            with open(args.summary_out, "w", newline="") as f_sum:
-                writer = csv.writer(f_sum, delimiter="\t")
-                writer.writerow(["Metric", "Value"])
-                writer.writerow(["Total_Mapped_Fragments", total_fragments])
-                writer.writerow(["GeneBody_Overlap_Fragments", gene_body_fragments])
-                writer.writerow(["Promoter_Overlap_Fragments", promoter_fragments])
+            total_fragments, gene_body_fragments, promoter_fragments, err = summary_conn.recv()
+            summary_proc.join()
+            if err:
+                print(f"Summary failed: {err}", file=sys.stderr)
+            else:
+                with open(args.summary_out, "w", newline="") as f_sum:
+                    writer = csv.writer(f_sum, delimiter="\t")
+                    writer.writerow(["Metric", "Value"])
+                    writer.writerow(["Total_Mapped_Fragments", total_fragments])
+                    writer.writerow(["GeneBody_Overlap_Fragments", gene_body_fragments])
+                    writer.writerow(["Promoter_Overlap_Fragments", promoter_fragments])
+                print(
+                    f"\n[Done] Processed {count} genes. Results saved to {args.out}. "
+                    f"Summary saved to {args.summary_out}",
+                    file=sys.stderr,
+                )
+    else:
+        if is_bed:
             print(
-                f"\n[Done] Processed {count} genes. Results saved to {args.out}. "
-                f"Summary saved to {args.summary_out}",
+                f"\n[Done] Processed {count} regions. Results saved to {args.out}",
                 file=sys.stderr,
             )
-    else:
-        print(
-            f"\n[Done] Processed {count} genes. Results saved to {args.out}",
-            file=sys.stderr,
-        )
+        else:
+            print(
+                f"\n[Done] Processed {count} genes. Results saved to {args.out}",
+                file=sys.stderr,
+            )
 
 if __name__ == "__main__":
     main()

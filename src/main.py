@@ -8,6 +8,12 @@ from .bam_processor import BAMProcessor
 from .quantifier import Quantifier, quantify_gene_core
 from .summary import start_summary_worker, start_bed_summary_worker
 
+def positive_int(value):
+    value = int(value)
+    if value <= 0:
+        raise argparse.ArgumentTypeError("must be greater than 0")
+    return value
+
 def parse_args():
     ap = argparse.ArgumentParser(
         description="Calculate read counts/CPM from ChIP-seq BAM and GTF/BED."
@@ -39,12 +45,15 @@ def parse_args():
                     help="Count both mates instead of read1 only")
     ap.add_argument("--cpm-denominator", choices=["mapped", "filtered"], default="filtered",
                     help="CPM denominator: total mapped reads or reads passing filters")
+    ap.add_argument("--bed-bin-size", type=positive_int,
+                    help="BED mode only: bin size in bp for reporting the highest overlap-count bin")
     ap.add_argument("--summary-out",
                     help="Write summary metrics to this TSV path (default: disabled)")
     return ap.parse_args()
 
 # Global variable for worker processes
 _global_bam_processor = None
+_global_bed_bin_size = None
 
 def init_worker(
     bam_path,
@@ -56,12 +65,13 @@ def init_worker(
     require_proper_pair,
     count_fragments,
     cpm_denominator,
+    bed_bin_size,
 ):
     """
     Initialize BAMProcessor in each worker process.
     This runs once per process.
     """
-    global _global_bam_processor
+    global _global_bam_processor, _global_bed_bin_size
     try:
         _global_bam_processor = BAMProcessor(
             bam_path,
@@ -74,6 +84,7 @@ def init_worker(
             count_fragments=count_fragments,
             cpm_denominator=cpm_denominator,
         )
+        _global_bed_bin_size = bed_bin_size
     except Exception as e:
         print(f"Error initializing worker with BAM {bam_path}: {e}", file=sys.stderr)
         sys.exit(1)
@@ -96,7 +107,7 @@ def process_bed_wrapper(region):
     count = _global_bam_processor.count_reads(chrom, start + 1, end)
     total_reads = _global_bam_processor.total_mapped_reads
     cpm = (count / total_reads * 1_000_000) if total_reads > 0 else 0.0
-    return {
+    result = {
         "region_id": region["name"],
         "chrom": chrom,
         "start": start,
@@ -105,6 +116,18 @@ def process_bed_wrapper(region):
         "count": count,
         "cpm": cpm,
     }
+    if _global_bed_bin_size:
+        max_count, max_start, max_end = _global_bam_processor.max_overlap_bin(
+            chrom, start, end, _global_bed_bin_size
+        )
+        result.update({
+            "max_bin_start": max_start,
+            "max_bin_end": max_end,
+            "max_bin_count": max_count,
+            "max_bin_cpm": (max_count / total_reads * 1_000_000) if total_reads > 0 else 0.0,
+            "max_bin_fraction": (max_count / count) if count > 0 else 0.0,
+        })
+    return result
 
 def main():
     args = parse_args()
@@ -121,6 +144,14 @@ def main():
             "Count",
             "CPM",
         ]
+        if args.bed_bin_size:
+            headers.extend([
+                "MaxBin_Start",
+                "MaxBin_End",
+                "MaxBin_Count",
+                "MaxBin_CPM",
+                "MaxBin_Fraction",
+            ])
         parser = BEDParser(args.bed)
         print(f"Processing regions from {args.bed}...", file=sys.stderr)
         regions = list(parser.get_regions())
@@ -160,6 +191,7 @@ def main():
                     not args.allow_improper_pair,
                     not args.count_all_paired_reads,
                     args.cpm_denominator,
+                    args.bed_bin_size,
                 ),
             ) as pool:
                 if is_bed:
@@ -174,6 +206,14 @@ def main():
                             res["count"],
                             f"{res['cpm']:.4f}",
                         ]
+                        if args.bed_bin_size:
+                            row.extend([
+                                res["max_bin_start"],
+                                res["max_bin_end"],
+                                res["max_bin_count"],
+                                f"{res['max_bin_cpm']:.4f}",
+                                f"{res['max_bin_fraction']:.4f}",
+                            ])
                         writer.writerow(row)
                         count += 1
                         if count % 1000 == 0:
@@ -236,6 +276,23 @@ def main():
                         count_reads,
                         f"{cpm:.4f}",
                     ]
+                    if args.bed_bin_size:
+                        max_count, max_start, max_end = bam_proc.max_overlap_bin(
+                            region["chrom"], region["start"], region["end"], args.bed_bin_size
+                        )
+                        max_cpm = (
+                            max_count / bam_proc.total_mapped_reads * 1_000_000
+                            if bam_proc.total_mapped_reads > 0
+                            else 0.0
+                        )
+                        max_fraction = (max_count / count_reads) if count_reads > 0 else 0.0
+                        row.extend([
+                            max_start,
+                            max_end,
+                            max_count,
+                            f"{max_cpm:.4f}",
+                            f"{max_fraction:.4f}",
+                        ])
                     writer.writerow(row)
                     count += 1
                     if count % 1000 == 0:

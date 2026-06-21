@@ -38,6 +38,21 @@ class BAMProcessor:
         self._warned_missing_chroms = set()
         self.total_mapped_reads = self._get_total_mapped()
 
+    def _resolve_chrom(self, chrom):
+        if chrom in self.bam.references:
+            return chrom
+        if chrom.startswith("chr") and chrom[3:] in self.bam.references:
+            return chrom[3:]
+        if "chr" + chrom in self.bam.references:
+            return "chr" + chrom
+        if chrom not in self._warned_missing_chroms:
+            self._warned_missing_chroms.add(chrom)
+            print(
+                f"Warning: chromosome {chrom} not found in BAM references; returning 0.",
+                file=sys.stderr,
+            )
+        return None
+
     def _get_total_mapped(self):
         """Get total mapped reads in BAM file."""
         if self.cpm_denominator == "filtered":
@@ -117,20 +132,9 @@ class BAMProcessor:
         # So we use pysam map/fetch(start-1, end)
         
         # Handle chromosome name mismatch (e.g., chr1 vs 1)
-        if chrom not in self.bam.references:
-            if chrom.startswith("chr") and chrom[3:] in self.bam.references:
-                chrom = chrom[3:]
-            elif "chr" + chrom in self.bam.references:
-                chrom = "chr" + chrom
-            else:
-                if chrom not in self._warned_missing_chroms:
-                    self._warned_missing_chroms.add(chrom)
-                    print(
-                        f"Warning: chromosome {chrom} not found in BAM references; returning 0.",
-                        file=sys.stderr,
-                    )
-                # Return 0 if chromosome not found
-                return 0
+        chrom = self._resolve_chrom(chrom)
+        if chrom is None:
+            return 0
                 
         try:
             # count() method is more efficient than iterating with fetch()
@@ -167,6 +171,75 @@ class BAMProcessor:
             return self.bam.count(contig=chrom, start=start-1, stop=end)
         except ValueError:
             return 0
+
+    def max_overlap_bin(self, chrom, start, end, bin_size):
+        """
+        Find the highest-signal bin in a 0-based, half-open region.
+
+        A fragment/read contributes 1 to every bin it overlaps. This intentionally
+        counts the same fragment in multiple bins when the fragment spans bins.
+        """
+        if bin_size <= 0:
+            raise ValueError("bin_size must be greater than 0")
+        if end <= start:
+            return 0, start, end
+
+        chrom = self._resolve_chrom(chrom)
+        if chrom is None:
+            return 0, start, min(start + bin_size, end)
+
+        n_bins = (end - start + bin_size - 1) // bin_size
+        bin_counts = [0] * n_bins
+
+        try:
+            if self.count_fragments:
+                counted_qnames = set()
+                for read in self.bam.fetch(contig=chrom, start=start, stop=end):
+                    if not self._should_count_read(read):
+                        continue
+                    if read.is_paired and read.reference_id != read.next_reference_id:
+                        continue
+                    if read.query_name in counted_qnames:
+                        continue
+                    if read.is_paired:
+                        tlen = abs(read.template_length)
+                        if tlen == 0:
+                            continue
+                        fragment_start = min(read.reference_start, read.next_reference_start)
+                        fragment_end = fragment_start + tlen
+                    else:
+                        fragment_start = read.reference_start
+                        fragment_end = read.reference_end
+                    counted_qnames.add(read.query_name)
+                    self._add_interval_to_bins(
+                        bin_counts, start, end, bin_size, fragment_start, fragment_end
+                    )
+            else:
+                for read in self.bam.fetch(contig=chrom, start=start, stop=end):
+                    if not self._should_count_read(read):
+                        continue
+                    self._add_interval_to_bins(
+                        bin_counts, start, end, bin_size, read.reference_start, read.reference_end
+                    )
+        except ValueError:
+            return 0, start, min(start + bin_size, end)
+
+        max_count = max(bin_counts) if bin_counts else 0
+        max_index = bin_counts.index(max_count) if bin_counts else 0
+        max_start = start + max_index * bin_size
+        max_end = min(max_start + bin_size, end)
+        return max_count, max_start, max_end
+
+    @staticmethod
+    def _add_interval_to_bins(bin_counts, region_start, region_end, bin_size, iv_start, iv_end):
+        overlap_start = max(region_start, iv_start)
+        overlap_end = min(region_end, iv_end)
+        if overlap_end <= overlap_start:
+            return
+        first_bin = (overlap_start - region_start) // bin_size
+        last_bin = (overlap_end - 1 - region_start) // bin_size
+        for idx in range(first_bin, last_bin + 1):
+            bin_counts[idx] += 1
 
     def close(self):
         self.bam.close()

@@ -8,6 +8,7 @@
 - **Promoter Quantification**: Counts reads within a user-defined window around the Transcription Start Site (TSS) (GTF mode).
 - **Custom BED Quantification**: Counts reads over user-provided BED regions.
 - **CPM Normalization**: Automatically calculates normalized CPM values.
+- **BED Peak-Height Binning**: Optionally reports the highest-signal bin inside each BED region.
 - **Modular Codebase**: Clean, maintainable Python project structure.
 
 ## Requirements
@@ -42,6 +43,15 @@ python chipquant.py --bed /path/to/regions.bed \
                     --out bed_counts.tsv
 ```
 
+To report the highest local peak-height bin inside each BED region, add a bin size:
+
+```bash
+python chipquant.py --bed /path/to/regions.bed \
+                    --bam /path/to/chipseq.bam \
+                    --out bed_counts.tsv \
+                    --bed-bin-size 10
+```
+
 ### BED Format Recommendation
 
 Use standard BED (0-based, half-open). Minimal required columns are `chrom`, `start`, `end`.
@@ -71,6 +81,7 @@ chr2	5000	8000	peak_3	0	.
 - `--allow-improper-pair`: Allow improperly paired reads to be counted (default: false).
 - `--count-all-paired-reads`: Count both mates instead of fragment-level counting (default: false).
 - `--cpm-denominator`: CPM denominator strategy: `filtered` (default) or `mapped`.
+- `--bed-bin-size`: BED mode only. Split each BED region into fixed-width bins and report the bin with the highest overlap count.
 - `--summary-out`: Write summary metrics to this TSV path (default: disabled).
 
 ## Output Format
@@ -86,6 +97,15 @@ The output TSV contains (BED mode):
 - Region metadata (RegionID, Chrom, Start, End, Strand)
 - **Count**: Raw reads in region.
 - **CPM**: CPM normalized counts for region.
+
+When `--bed-bin-size` is provided, BED output also contains:
+- **MaxBin_Start**: Start coordinate of the highest-signal bin.
+- **MaxBin_End**: End coordinate of the highest-signal bin.
+- **MaxBin_Count**: Number of fragments/read alignments overlapping that bin.
+- **MaxBin_CPM**: CPM-normalized `MaxBin_Count`.
+- **MaxBin_Fraction**: `MaxBin_Count / Count`, useful for estimating whether signal is concentrated near a local summit.
+
+For `--bed-bin-size`, a fragment contributes `1` to every bin it overlaps. This means one fragment can contribute to multiple bins when it spans bin boundaries. With the default fragment-level paired-end behavior, paired reads are counted as one fragment. If `--count-all-paired-reads` is used, each read alignment is counted separately.
 
 ## Summary Output
 
